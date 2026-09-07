@@ -566,7 +566,7 @@ func (s *InboundService) AddClientStat(tx *gorm.DB, inboundId int, client *model
 	}).Create(&clientTraffic).Error
 }
 
-func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *model.Client) error {
+func (s *InboundService) UpdateClientStat(tx *gorm.DB, inboundId int, email string, client *model.Client) error {
 	result := tx.Model(xray.ClientTraffic{}).
 		Where("email = ?", email).
 		Updates(map[string]any{
@@ -578,8 +578,15 @@ func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *mod
 			"reset_day":   client.ResetDay,
 			"reset_max":   client.ResetMax,
 		})
-	err := result.Error
-	return err
+	if result.Error != nil {
+		return result.Error
+	}
+	// A client kept across an inbound edit only ever reaches this update, so a
+	// stats row lost earlier stayed missing and the client read 0 B forever.
+	if result.RowsAffected == 0 {
+		return s.AddClientStat(tx, inboundId, client)
+	}
+	return nil
 }
 
 func (s *InboundService) DelClientStat(tx *gorm.DB, email string) error {

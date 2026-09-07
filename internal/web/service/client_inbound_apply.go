@@ -895,7 +895,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 					}
 				}
 				if emailUnchanged || targetExists == 0 {
-					if e := inboundSvc.UpdateClientStat(tx, oldEmail, &clients[0]); e != nil {
+					if e := inboundSvc.UpdateClientStat(tx, data.Id, oldEmail, &clients[0]); e != nil {
 						return e
 					}
 					if e := inboundSvc.UpdateClientIPs(tx, oldEmail, clients[0].Email); e != nil {
@@ -914,7 +914,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 							return e
 						}
 					}
-					if e := inboundSvc.UpdateClientStat(tx, clients[0].Email, &clients[0]); e != nil {
+					if e := inboundSvc.UpdateClientStat(tx, data.Id, clients[0].Email, &clients[0]); e != nil {
 						return e
 					}
 				}
