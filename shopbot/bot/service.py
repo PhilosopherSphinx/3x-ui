@@ -74,7 +74,7 @@ class Provisioner:
             return self.sub_link(sub_id)
 
         await self._panel.update_client(
-            email=email,
+            current=existing,
             expiry_time=next_expiry(existing.expiry_time, tariff.days),
             total_bytes=total_bytes,
             enable=True,
@@ -105,6 +105,6 @@ class Provisioner:
             "link": self.sub_link(client.sub_id),
             "expiry_ms": client.expiry_time,
             "used_gb": client.used_traffic / GIB,
-            "limit_gb": client.total_gb / GIB if client.total_gb else 0,
+            "limit_gb": client.total_bytes / GIB if client.total_bytes else 0,
             "enable": client.enable,
         }

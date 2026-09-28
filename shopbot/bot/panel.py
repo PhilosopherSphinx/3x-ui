@@ -1,12 +1,20 @@
-"""Клиент API панели 3x-ui.
+"""Клиент API панели 3x-ui v3.x.
 
-ЕДИНСТВЕННЫЙ модуль, зависящий от версии панели. Написан под форк v3.x
-(унифицированная таблица клиентов, маршруты /panel/api/clients/*).
-Апстрим 2.x держит клиентов JSON-строкой внутри инбаунда и использует
-/panel/api/inbounds/addClient — там нужен другой файл, не правки здесь.
+ЕДИНСТВЕННЫЙ модуль, зависящий от версии панели. Формы запросов сверены по
+исходникам v3.8.5 (internal/web/controller/client.go, internal/web/service/
+client.go, client_crud.go), а не угаданы.
 
-Формы запросов выведены из модели ClientRecord. Сверить с живой панелью:
-    GET /panel/api/openapi.json
+Три ловушки этого API, из-за которых наивный клиент молча ломается:
+
+1. /clients/add принимает ВЛОЖЕННЫЙ payload {"client": {...}, "inboundIds": []},
+   а /clients/update/:email — ПЛОСКИЙ model.Client. Формы разные.
+2. При чтении UUID лежит в поле "uuid", а при записи его ждут в поле "id".
+   Поле "id" в ответе — это целочисленный ключ строки БД, не UUID.
+3. Update ЗАМЕНЯЕТ запись целиком и требует непустой email
+   (client_crud.go:585). Разреженный payload стирает subId и UUID, поэтому
+   обновление здесь всегда read-modify-write.
+
+totalGB вопреки названию хранится в байтах (ldap_sync_job.go:218).
 """
 
 from __future__ import annotations
@@ -27,11 +35,13 @@ class PanelError(RuntimeError):
 class PanelClient:
     email: str
     sub_id: str
+    uuid: str
     expiry_time: int  # мс от эпохи; 0 — бессрочно
-    total_gb: int  # байты; 0 — без лимита
+    total_bytes: int  # 0 — без лимита
     used_traffic: int
     enable: bool
     inbound_ids: tuple[int, ...]
+    raw: dict  # исходная запись — основа для read-modify-write
 
 
 class Panel:
@@ -72,8 +82,8 @@ class Panel:
         try:
             obj = await self._call("GET", f"/clients/get/{email}")
         except PanelError as exc:
-            # Панель отвечает success:false и на «нет такого клиента».
-            if "not found" in str(exc).lower() or "не найден" in str(exc).lower():
+            # Отсутствие клиента панель отдаёт как success:false, а не как 404.
+            if "not found" in str(exc).lower() or "record" in str(exc).lower():
                 return None
             raise
         if not obj:
@@ -82,11 +92,13 @@ class Panel:
         return PanelClient(
             email=record.get("email", email),
             sub_id=record.get("subId", ""),
+            uuid=record.get("uuid", ""),
             expiry_time=int(record.get("expiryTime") or 0),
-            total_gb=int(record.get("totalGB") or 0),
+            total_bytes=int(record.get("totalGB") or 0),
             used_traffic=int(obj.get("usedTraffic") or 0),
             enable=bool(record.get("enable", True)),
             inbound_ids=tuple(obj.get("inboundIds") or ()),
+            raw=record,
         )
 
     async def create_client(
@@ -98,40 +110,62 @@ class Panel:
         expiry_time: int,
         total_bytes: int,
         inbound_ids: tuple[int, ...],
+        flow: str = "",
         comment: str = "",
+        limit_hwid: int = 0,
     ) -> None:
+        client = {
+            "id": uuid,  # именно "id": на запись UUID идёт сюда
+            "email": email,
+            "subId": sub_id,
+            "tgId": tg_id,
+            "expiryTime": expiry_time,
+            "totalGB": total_bytes,
+            "enable": True,
+            "comment": comment,
+            "limitIp": 0,
+            "limitHwid": limit_hwid,
+        }
+        if flow:
+            client["flow"] = flow
         await self._call(
-            "POST",
-            "/clients/add",
-            {
-                "email": email,
-                "subId": sub_id,
-                "uuid": uuid,
-                "tgId": tg_id,
-                "expiryTime": expiry_time,
-                "totalGB": total_bytes,
-                "enable": True,
-                "comment": comment,
-                "inboundIds": list(inbound_ids),
-            },
+            "POST", "/clients/add", {"client": client, "inboundIds": list(inbound_ids)}
         )
 
     async def update_client(
         self,
-        email: str,
+        current: PanelClient,
         expiry_time: int,
         total_bytes: int,
         enable: bool = True,
+        limit_hwid: int | None = None,
     ) -> None:
-        await self._call(
-            "POST",
-            f"/clients/update/{email}",
-            {
-                "expiryTime": expiry_time,
-                "totalGB": total_bytes,
-                "enable": enable,
-            },
-        )
+        """Read-modify-write: Update заменяет запись, а не дополняет её."""
+        record = current.raw
+        payload = {
+            "id": current.uuid,
+            "email": current.email,
+            "subId": current.sub_id,
+            "tgId": int(record.get("tgId") or 0),
+            "expiryTime": expiry_time,
+            "totalGB": total_bytes,
+            "enable": enable,
+            "comment": record.get("comment") or "",
+            "limitIp": int(record.get("limitIp") or 0),
+            "limitHwid": (
+                limit_hwid
+                if limit_hwid is not None
+                else int(record.get("limitHwid") or 0)
+            ),
+            "reset": int(record.get("reset") or 0),
+            "resetDay": int(record.get("resetDay") or 0),
+            "resetMax": int(record.get("resetMax") or 0),
+        }
+        for optional in ("flow", "security", "password", "auth", "group"):
+            value = record.get(optional)
+            if value:
+                payload[optional] = value
+        await self._call("POST", f"/clients/update/{current.email}", payload)
 
     async def attach(self, email: str, inbound_ids: tuple[int, ...]) -> None:
         await self._call(
